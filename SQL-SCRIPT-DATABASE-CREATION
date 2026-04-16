@@ -1,0 +1,753 @@
+/*
+╔════════════════════════════════════════════════════════════════╗
+║     MULTI-TENANT JEWELRY TRADING PLATFORM                      ║
+║     Database Schema for SQL Server 2019+                       ║
+║     Version: 1.0                                               ║
+╚════════════════════════════════════════════════════════════════╝
+*/
+
+-- ============================================================
+-- 1. DATABASE CREATION
+-- ============================================================
+
+IF EXISTS (SELECT 1 FROM sys.databases WHERE name = 'JewelryTradingPlatform')
+BEGIN
+    ALTER DATABASE JewelryTradingPlatform SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+    DROP DATABASE JewelryTradingPlatform;
+END
+GO
+
+CREATE DATABASE JewelryTradingPlatform;
+GO
+
+USE JewelryTradingPlatform;
+GO
+
+-- ============================================================
+-- 2. CORE TABLES
+-- ============================================================
+
+-- 2.1 TENANTS (آبشده‌های فروش)
+CREATE TABLE Tenants (
+    tenant_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    tenant_name NVARCHAR(255) NOT NULL,
+    owner_user_id UNIQUEIDENTIFIER,
+    status NVARCHAR(50) DEFAULT 'active', -- active, suspended, inactive
+    subscription_type NVARCHAR(50) DEFAULT 'basic', -- free, basic, premium
+    subscription_start_date DATETIME,
+    subscription_end_date DATETIME,
+    max_users INT DEFAULT 50,
+    allow_cross_tenant_transactions BIT DEFAULT 0,
+    phone NVARCHAR(20),
+    email NVARCHAR(255),
+    address NVARCHAR(MAX),
+    city NVARCHAR(100),
+    province NVARCHAR(100),
+    postal_code NVARCHAR(20),
+    country NVARCHAR(100),
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_Tenants PRIMARY KEY (tenant_id),
+    CONSTRAINT CK_Tenant_Status CHECK (status IN ('active', 'suspended', 'inactive')),
+    CONSTRAINT CK_Tenant_SubType CHECK (subscription_type IN ('free', 'basic', 'premium'))
+);
+
+-- Index برای تسریع جستجو
+CREATE UNIQUE INDEX UX_Tenants_Name ON Tenants(tenant_name);
+CREATE INDEX IX_Tenants_Status ON Tenants(status);
+GO
+
+-- 2.2 USERS (تمام کاربران سیستم)
+CREATE TABLE Users (
+    user_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    email NVARCHAR(255) NOT NULL UNIQUE,
+    phone NVARCHAR(20),
+    first_name NVARCHAR(100),
+    last_name NVARCHAR(100),
+    password_hash NVARCHAR(MAX) NOT NULL,
+    status NVARCHAR(50) DEFAULT 'active', -- active, suspended, inactive, pending_verification
+    is_verified BIT DEFAULT 0,
+    is_email_verified BIT DEFAULT 0,
+    is_phone_verified BIT DEFAULT 0,
+    last_login DATETIME,
+    last_password_change DATETIME,
+    two_factor_enabled BIT DEFAULT 0,
+    two_factor_method NVARCHAR(50), -- email, sms, authenticator
+    profile_picture_url NVARCHAR(MAX),
+    national_id NVARCHAR(50),
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_Users PRIMARY KEY (user_id),
+    CONSTRAINT CK_User_Status CHECK (status IN ('active', 'suspended', 'inactive', 'pending_verification')),
+    CONSTRAINT CK_Email_Format CHECK (email LIKE '%@%.%')
+);
+
+-- Indexes برای Users
+CREATE INDEX IX_Users_Email ON Users(email);
+CREATE INDEX IX_Users_Status ON Users(status);
+CREATE INDEX IX_Users_Phone ON Users(phone);
+GO
+
+-- 2.3 ROLES (نقش‌های داخل سیستم)
+CREATE TABLE Roles (
+    role_id INT PRIMARY KEY IDENTITY(1,1),
+    role_name NVARCHAR(100) NOT NULL, -- آبشده, کارگاه, بنکدار, مغازه, مشتری
+    description NVARCHAR(MAX),
+    color_code NVARCHAR(10), -- برای UI
+    icon_name NVARCHAR(100),
+    created_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_Roles PRIMARY KEY (role_id),
+    CONSTRAINT UK_Roles_Name UNIQUE (role_name)
+);
+
+-- 2.4 ROLE_LEVELS (سطوح برای هر نقش)
+CREATE TABLE RoleLevels (
+    role_level_id INT PRIMARY KEY IDENTITY(1,1),
+    role_id INT NOT NULL,
+    level_number INT NOT NULL, -- 1, 2, 3, etc.
+    level_name NVARCHAR(100), -- "سطح 1", "سطح 2", "مدیر"
+    description NVARCHAR(MAX),
+    max_transaction_amount DECIMAL(18, 2), -- محدودیت مبلغ تراکنش (null = نامحدود)
+    max_daily_transaction_count INT, -- محدودیت تعداد تراکنش روزانه
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_RoleLevels PRIMARY KEY (role_level_id),
+    CONSTRAINT FK_RoleLevel_Role FOREIGN KEY (role_id) REFERENCES Roles(role_id) ON DELETE CASCADE,
+    CONSTRAINT UK_RoleLevel_Unique UNIQUE (role_id, level_number),
+    CONSTRAINT CK_RoleLevel_Number CHECK (level_number > 0)
+);
+
+CREATE INDEX IX_RoleLevels_RoleId ON RoleLevels(role_id);
+GO
+
+-- 2.5 USER_TENANT_ROLES (تخصیص نقش و سطح به کاربر در Tenant)
+CREATE TABLE UserTenantRoles (
+    user_tenant_role_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    user_id UNIQUEIDENTIFIER NOT NULL,
+    tenant_id UNIQUEIDENTIFIER NOT NULL,
+    role_id INT NOT NULL,
+    role_level_id INT NOT NULL,
+    is_primary_tenant BIT DEFAULT 0, -- اگر کاربر چند tenant داشته باشه، کدوم primary هست
+    status NVARCHAR(50) DEFAULT 'active', -- active, suspended, inactive
+    assigned_at DATETIME DEFAULT GETDATE(),
+    assigned_by_user_id UNIQUEIDENTIFIER,
+    
+    CONSTRAINT PK_UserTenantRoles PRIMARY KEY (user_tenant_role_id),
+    CONSTRAINT FK_UTR_User FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    CONSTRAINT FK_UTR_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id) ON DELETE CASCADE,
+    CONSTRAINT FK_UTR_Role FOREIGN KEY (role_id) REFERENCES Roles(role_id),
+    CONSTRAINT FK_UTR_RoleLevel FOREIGN KEY (role_level_id) REFERENCES RoleLevels(role_level_id),
+    CONSTRAINT FK_UTR_AssignedBy FOREIGN KEY (assigned_by_user_id) REFERENCES Users(user_id),
+    CONSTRAINT UK_UTR_Unique UNIQUE (user_id, tenant_id, role_id)
+);
+
+CREATE INDEX IX_UTR_User ON UserTenantRoles(user_id);
+CREATE INDEX IX_UTR_Tenant ON UserTenantRoles(tenant_id);
+CREATE INDEX IX_UTR_Role ON UserTenantRoles(role_id);
+CREATE INDEX IX_UTR_RoleLevel ON UserTenantRoles(role_level_id);
+GO
+
+-- 2.6 SESSIONS (جلسات فعال کاربران)
+CREATE TABLE Sessions (
+    session_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    user_id UNIQUEIDENTIFIER NOT NULL,
+    tenant_id UNIQUEIDENTIFIER NOT NULL,
+    role_id INT NOT NULL,
+    role_level_id INT NOT NULL,
+    access_token NVARCHAR(MAX),
+    refresh_token NVARCHAR(MAX),
+    login_time DATETIME DEFAULT GETDATE(),
+    last_activity DATETIME DEFAULT GETDATE(),
+    expires_at DATETIME,
+    ip_address NVARCHAR(45),
+    user_agent NVARCHAR(MAX),
+    device_id NVARCHAR(255),
+    status NVARCHAR(50) DEFAULT 'active', -- active, expired, revoked
+    revoked_at DATETIME,
+    revoked_reason NVARCHAR(255),
+    
+    CONSTRAINT PK_Sessions PRIMARY KEY (session_id),
+    CONSTRAINT FK_Session_User FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    CONSTRAINT FK_Session_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id),
+    CONSTRAINT FK_Session_Role FOREIGN KEY (role_id) REFERENCES Roles(role_id),
+    CONSTRAINT FK_Session_RoleLevel FOREIGN KEY (role_level_id) REFERENCES RoleLevels(role_level_id),
+    CONSTRAINT CK_Session_Status CHECK (status IN ('active', 'expired', 'revoked'))
+);
+
+CREATE INDEX IX_Session_User ON Sessions(user_id);
+CREATE INDEX IX_Session_Tenant ON Sessions(tenant_id);
+CREATE INDEX IX_Session_Status ON Sessions(status);
+CREATE INDEX IX_Session_ExpiresAt ON Sessions(expires_at);
+GO
+
+-- ============================================================
+-- 3. PERMISSIONS & ACCESS CONTROL TABLES
+-- ============================================================
+
+-- 3.1 PERMISSIONS (دسترسی‌های موجود)
+CREATE TABLE Permissions (
+    permission_id INT PRIMARY KEY IDENTITY(1,1),
+    permission_name NVARCHAR(255) NOT NULL, 
+    -- مثال: VIEW_TRANSACTIONS, CREATE_TRANSACTION, MANAGE_USERS
+    description NVARCHAR(MAX),
+    category NVARCHAR(100), -- VIEW, CREATE, UPDATE, DELETE, MANAGE, ADMIN
+    created_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_Permissions PRIMARY KEY (permission_id),
+    CONSTRAINT UK_Permissions_Name UNIQUE (permission_name)
+);
+
+-- 3.2 ROLE_LEVEL_PERMISSIONS (هر level چه دسترسی‌هایی دارد)
+CREATE TABLE RoleLevelPermissions (
+    role_level_permission_id INT PRIMARY KEY IDENTITY(1,1),
+    role_level_id INT NOT NULL,
+    permission_id INT NOT NULL,
+    
+    CONSTRAINT PK_RoleLevelPermissions PRIMARY KEY (role_level_permission_id),
+    CONSTRAINT FK_RLP_RoleLevel FOREIGN KEY (role_level_id) REFERENCES RoleLevels(role_level_id) ON DELETE CASCADE,
+    CONSTRAINT FK_RLP_Permission FOREIGN KEY (permission_id) REFERENCES Permissions(permission_id),
+    CONSTRAINT UK_RoleLevelPermission_Unique UNIQUE (role_level_id, permission_id)
+);
+
+CREATE INDEX IX_RLP_RoleLevel ON RoleLevelPermissions(role_level_id);
+CREATE INDEX IX_RLP_Permission ON RoleLevelPermissions(permission_id);
+GO
+
+-- ============================================================
+-- 4. BUSINESS CORE TABLES
+-- ============================================================
+
+-- 4.1 METALS (فلزات: طلا، نقره، مس، etc.)
+CREATE TABLE Metals (
+    metal_id INT PRIMARY KEY IDENTITY(1,1),
+    metal_name NVARCHAR(100) NOT NULL, -- طلا, نقره, مس, پلاتین
+    metal_symbol NVARCHAR(10) NOT NULL, -- Au, Ag, Cu, Pt
+    atomic_number INT,
+    created_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_Metals PRIMARY KEY (metal_id),
+    CONSTRAINT UK_Metals_Name UNIQUE (metal_name),
+    CONSTRAINT UK_Metals_Symbol UNIQUE (metal_symbol)
+);
+
+-- 4.2 PRODUCTS (محصول: ترکیب فلز + عیار)
+CREATE TABLE Products (
+    product_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    tenant_id UNIQUEIDENTIFIER NOT NULL,
+    product_name NVARCHAR(255),
+    metal_id INT NOT NULL,
+    purity INT NOT NULL, -- عیار: 18, 24, etc.
+    purity_percentage DECIMAL(5, 2), -- 75%, 99.9%, etc.
+    description NVARCHAR(MAX),
+    is_active BIT DEFAULT 1,
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_Products PRIMARY KEY (product_id),
+    CONSTRAINT FK_Product_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id) ON DELETE CASCADE,
+    CONSTRAINT FK_Product_Metal FOREIGN KEY (metal_id) REFERENCES Metals(metal_id),
+    CONSTRAINT CK_Product_Purity CHECK (purity > 0 AND purity <= 100)
+);
+
+CREATE INDEX IX_Product_Tenant ON Products(tenant_id);
+CREATE INDEX IX_Product_Metal ON Products(metal_id);
+CREATE INDEX IX_Product_Active ON Products(is_active);
+GO
+
+-- 4.3 WALLETS (کیف پول - هر کاربر در هر Tenant یک wallet دارد)
+CREATE TABLE Wallets (
+    wallet_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    user_id UNIQUEIDENTIFIER NOT NULL,
+    tenant_id UNIQUEIDENTIFIER NOT NULL,
+    wallet_balance DECIMAL(18, 2) DEFAULT 0, -- موجودی نقدی (ریال)
+    is_active BIT DEFAULT 1,
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_Wallets PRIMARY KEY (wallet_id),
+    CONSTRAINT FK_Wallet_User FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    CONSTRAINT FK_Wallet_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id),
+    CONSTRAINT UK_Wallet_User_Tenant UNIQUE (user_id, tenant_id),
+    CONSTRAINT CK_Wallet_Balance CHECK (wallet_balance >= 0)
+);
+
+CREATE INDEX IX_Wallet_User ON Wallets(user_id);
+CREATE INDEX IX_Wallet_Tenant ON Wallets(tenant_id);
+GO
+
+-- 4.4 WALLET_METALS (موجودی فلزات در کیف پول)
+CREATE TABLE WalletMetals (
+    wallet_metal_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    wallet_id UNIQUEIDENTIFIER NOT NULL,
+    product_id UNIQUEIDENTIFIER NOT NULL,
+    quantity DECIMAL(18, 6) NOT NULL DEFAULT 0, -- وزن به گرم
+    reserved_quantity DECIMAL(18, 6) DEFAULT 0, -- موجودی رزرو شده برای تراکنش‌های در حال انجام
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_WalletMetals PRIMARY KEY (wallet_metal_id),
+    CONSTRAINT FK_WalletMetal_Wallet FOREIGN KEY (wallet_id) REFERENCES Wallets(wallet_id) ON DELETE CASCADE,
+    CONSTRAINT FK_WalletMetal_Product FOREIGN KEY (product_id) REFERENCES Products(product_id),
+    CONSTRAINT UK_WalletMetal_Unique UNIQUE (wallet_id, product_id),
+    CONSTRAINT CK_WalletMetal_Quantity CHECK (quantity >= 0),
+    CONSTRAINT CK_WalletMetal_Reserved CHECK (reserved_quantity >= 0)
+);
+
+CREATE INDEX IX_WalletMetal_Wallet ON WalletMetals(wallet_id);
+CREATE INDEX IX_WalletMetal_Product ON WalletMetals(product_id);
+GO
+
+-- ============================================================
+-- 5. TRANSACTION TABLES
+-- ============================================================
+
+-- 5.1 TRANSACTIONS (تمام تراکنش‌ها)
+CREATE TABLE Transactions (
+    transaction_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    tenant_id UNIQUEIDENTIFIER NOT NULL,
+    transaction_type NVARCHAR(50) NOT NULL, -- PURCHASE, SALE, TRANSFER, DEPOSIT, WITHDRAWAL
+    from_user_id UNIQUEIDENTIFIER, -- کی فروخت/منتقل کرد
+    to_user_id UNIQUEIDENTIFIER, -- کی خرید/دریافت کرد
+    product_id UNIQUEIDENTIFIER,
+    quantity DECIMAL(18, 6), -- وزن
+    unit_price DECIMAL(18, 2), -- قیمت واحد
+    total_amount DECIMAL(18, 2), -- مبلغ کل
+    payment_method NVARCHAR(50), -- WALLET_TRANSFER, CASH, CHEQUE, BANK_TRANSFER, etc.
+    status NVARCHAR(50) DEFAULT 'pending', -- pending, completed, cancelled, disputed, on_hold
+    reference_number NVARCHAR(255), -- شماره فاکتور/سند
+    invoice_number NVARCHAR(50),
+    description NVARCHAR(MAX),
+    notes NVARCHAR(MAX),
+    created_at DATETIME DEFAULT GETDATE(),
+    completed_at DATETIME,
+    cancelled_at DATETIME,
+    cancelled_reason NVARCHAR(MAX),
+    created_by_user_id UNIQUEIDENTIFIER, -- کاربری که این تراکنش رو ثبت کرد
+    approved_by_user_id UNIQUEIDENTIFIER,
+    approved_at DATETIME,
+    
+    CONSTRAINT PK_Transactions PRIMARY KEY (transaction_id),
+    CONSTRAINT FK_Transaction_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id) ON DELETE CASCADE,
+    CONSTRAINT FK_Transaction_FromUser FOREIGN KEY (from_user_id) REFERENCES Users(user_id),
+    CONSTRAINT FK_Transaction_ToUser FOREIGN KEY (to_user_id) REFERENCES Users(user_id),
+    CONSTRAINT FK_Transaction_Product FOREIGN KEY (product_id) REFERENCES Products(product_id),
+    CONSTRAINT FK_Transaction_CreatedBy FOREIGN KEY (created_by_user_id) REFERENCES Users(user_id),
+    CONSTRAINT FK_Transaction_ApprovedBy FOREIGN KEY (approved_by_user_id) REFERENCES Users(user_id),
+    CONSTRAINT CK_Transaction_Type CHECK (transaction_type IN ('PURCHASE', 'SALE', 'TRANSFER', 'DEPOSIT', 'WITHDRAWAL')),
+    CONSTRAINT CK_Transaction_Status CHECK (status IN ('pending', 'completed', 'cancelled', 'disputed', 'on_hold')),
+    CONSTRAINT CK_Transaction_Amount CHECK (total_amount > 0)
+);
+
+CREATE INDEX IX_Transaction_Tenant ON Transactions(tenant_id);
+CREATE INDEX IX_Transaction_FromUser ON Transactions(from_user_id);
+CREATE INDEX IX_Transaction_ToUser ON Transactions(to_user_id);
+CREATE INDEX IX_Transaction_Status ON Transactions(status);
+CREATE INDEX IX_Transaction_Type ON Transactions(transaction_type);
+CREATE INDEX IX_Transaction_CreatedAt ON Transactions(created_at);
+CREATE INDEX IX_Transaction_ReferenceNumber ON Transactions(reference_number);
+GO
+
+-- 5.2 TRANSACTION_ITEMS (اگر یک تراکنش چند محصول داشته باشه)
+CREATE TABLE TransactionItems (
+    transaction_item_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    transaction_id UNIQUEIDENTIFIER NOT NULL,
+    product_id UNIQUEIDENTIFIER NOT NULL,
+    quantity DECIMAL(18, 6),
+    unit_price DECIMAL(18, 2),
+    line_total DECIMAL(18, 2),
+    
+    CONSTRAINT PK_TransactionItems PRIMARY KEY (transaction_item_id),
+    CONSTRAINT FK_TxnItem_Transaction FOREIGN KEY (transaction_id) REFERENCES Transactions(transaction_id) ON DELETE CASCADE,
+    CONSTRAINT FK_TxnItem_Product FOREIGN KEY (product_id) REFERENCES Products(product_id)
+);
+
+CREATE INDEX IX_TransactionItems_Transaction ON TransactionItems(transaction_id);
+GO
+
+-- ============================================================
+-- 6. SUPPORT & CONFIGURATION TABLES
+-- ============================================================
+
+-- 6.1 TENANT_PERMISSION_SETTINGS (تنظیمات خاص Tenant)
+CREATE TABLE TenantPermissionSettings (
+    setting_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    tenant_id UNIQUEIDENTIFIER NOT NULL,
+    setting_key NVARCHAR(255), -- allow_cross_tenant_transactions, etc.
+    setting_value NVARCHAR(MAX), -- JSON format
+    description NVARCHAR(MAX),
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_TenantSettings PRIMARY KEY (setting_id),
+    CONSTRAINT FK_TenantSettings_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id) ON DELETE CASCADE,
+    CONSTRAINT UK_TenantSettings_Key UNIQUE (tenant_id, setting_key)
+);
+
+-- 6.2 AUDIT_LOG (سیاهههی تمام تغییرات)
+CREATE TABLE AuditLog (
+    audit_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    tenant_id UNIQUEIDENTIFIER NOT NULL,
+    user_id UNIQUEIDENTIFIER,
+    action NVARCHAR(255), -- CREATE, UPDATE, DELETE, TRANSFER, LOGIN, etc.
+    entity_type NVARCHAR(100), -- USER, TRANSACTION, WALLET, etc.
+    entity_id NVARCHAR(MAX), -- ID آبجکتی که تغییر کرده
+    old_value NVARCHAR(MAX), -- مقدار قبلی (JSON format)
+    new_value NVARCHAR(MAX), -- مقدار جدید (JSON format)
+    ip_address NVARCHAR(45),
+    user_agent NVARCHAR(MAX),
+    status NVARCHAR(50), -- SUCCESS, FAILED, PENDING
+    error_message NVARCHAR(MAX),
+    created_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_AuditLog PRIMARY KEY (audit_id),
+    CONSTRAINT FK_Audit_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id),
+    CONSTRAINT FK_Audit_User FOREIGN KEY (user_id) REFERENCES Users(user_id)
+);
+
+CREATE INDEX IX_AuditLog_Tenant ON AuditLog(tenant_id);
+CREATE INDEX IX_AuditLog_User ON AuditLog(user_id);
+CREATE INDEX IX_AuditLog_CreatedAt ON AuditLog(created_at);
+CREATE INDEX IX_AuditLog_EntityType ON AuditLog(entity_type);
+GO
+
+-- 6.3 API_LOG (لاگ APIها برای debugging)
+CREATE TABLE ApiLog (
+    api_log_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    user_id UNIQUEIDENTIFIER,
+    tenant_id UNIQUEIDENTIFIER,
+    api_endpoint NVARCHAR(500),
+    http_method NVARCHAR(10), -- GET, POST, PUT, DELETE, PATCH
+    request_body NVARCHAR(MAX),
+    response_body NVARCHAR(MAX),
+    status_code INT,
+    execution_time_ms INT,
+    ip_address NVARCHAR(45),
+    user_agent NVARCHAR(MAX),
+    error_message NVARCHAR(MAX),
+    created_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_ApiLog PRIMARY KEY (api_log_id),
+    CONSTRAINT FK_ApiLog_User FOREIGN KEY (user_id) REFERENCES Users(user_id),
+    CONSTRAINT FK_ApiLog_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id)
+);
+
+CREATE INDEX IX_ApiLog_TenantUser ON ApiLog(tenant_id, user_id);
+CREATE INDEX IX_ApiLog_CreatedAt ON ApiLog(created_at);
+GO
+
+-- 6.4 NOTIFICATION_PREFERENCES (تنظیمات اطلاع‌رسانی)
+CREATE TABLE NotificationPreferences (
+    preference_id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
+    user_id UNIQUEIDENTIFIER NOT NULL,
+    tenant_id UNIQUEIDENTIFIER NOT NULL,
+    notification_type NVARCHAR(100), -- EMAIL, SMS, IN_APP, PUSH
+    is_enabled BIT DEFAULT 1,
+    frequency NVARCHAR(50), -- IMMEDIATE, DAILY, WEEKLY, MONTHLY
+    created_at DATETIME DEFAULT GETDATE(),
+    updated_at DATETIME DEFAULT GETDATE(),
+    
+    CONSTRAINT PK_NotificationPrefs PRIMARY KEY (preference_id),
+    CONSTRAINT FK_NotifPref_User FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    CONSTRAINT FK_NotifPref_Tenant FOREIGN KEY (tenant_id) REFERENCES Tenants(tenant_id),
+    CONSTRAINT UK_NotifPref_Unique UNIQUE (user_id, tenant_id, notification_type)
+);
+
+-- ============================================================
+-- 7. SAMPLE DATA INSERTION
+-- ============================================================
+
+-- Insert Metals
+INSERT INTO Metals (metal_name, metal_symbol, atomic_number) VALUES
+    (N'طلا', 'Au', 79),
+    (N'نقره', 'Ag', 47),
+    (N'مس', 'Cu', 29),
+    (N'پلاتین', 'Pt', 78);
+GO
+
+-- Insert Roles
+INSERT INTO Roles (role_name, description, color_code, icon_name) VALUES
+    (N'آبشده فروش', N'بالای هرم - تاجر اصلی', '#FF6B6B', 'crown'),
+    (N'کارگاه طلاسازی', N'کارگاه تولید', '#4ECDC4', 'tools'),
+    (N'بنکدار', N'دارنده بانک', '#45B7D1', 'bank'),
+    (N'مغازه‌دار', N'فروشگاه محلی', '#FFA502', 'store'),
+    (N'مشتری', N'خریدار نهایی', '#95E1D3', 'user');
+GO
+
+-- Insert Role Levels
+INSERT INTO RoleLevels (role_id, level_number, level_name, description, max_transaction_amount, max_daily_transaction_count) VALUES
+    (1, 1, N'آبشده سطح 1', N'آبشده جدید', NULL, NULL),
+    (1, 2, N'آبشده سطح 2', N'آبشده تأیید‌شده', NULL, NULL),
+    (1, 3, N'مدیر آبشده', N'دسترسی کامل', NULL, NULL),
+    (2, 1, N'کارگاه سطح 1', N'کارگاه شروع‌کننده', 10000000, 100),
+    (2, 2, N'کارگاه سطح 2', N'کارگاه ثابت', NULL, NULL),
+    (3, 1, N'بنکدار سطح 1', N'بنکدار جدید', 50000000, 50),
+    (3, 2, N'بنکدار سطح 2', N'بنکدار مجرب', 200000000, 200),
+    (3, 3, N'مدیر بانک', N'دسترسی کامل', NULL, NULL),
+    (4, 1, N'مغازه سطح 1', N'مغازه جدید', 5000000, 30),
+    (4, 2, N'مغازه سطح 2', N'مغازه قدیمی', NULL, NULL),
+    (5, 1, N'مشتری عادی', N'خریدار عام', 20000000, 10),
+    (5, 2, N'مشتری VIP', N'خریدار مهم', 100000000, NULL);
+GO
+
+-- Insert Permissions
+INSERT INTO Permissions (permission_name, description, category) VALUES
+    -- VIEW Permissions
+    (N'VIEW_TRANSACTIONS', N'مشاهده تراکنش‌ها', 'VIEW'),
+    (N'VIEW_WALLET', N'مشاهده کیف پول', 'VIEW'),
+    (N'VIEW_REPORTS', N'مشاهده گزارشات', 'VIEW'),
+    (N'VIEW_USERS', N'مشاهده لیست کاربران', 'VIEW'),
+    (N'VIEW_AUDIT_LOG', N'مشاهده سیاهههی تغییرات', 'VIEW'),
+    
+    -- CREATE Permissions
+    (N'CREATE_TRANSACTION', N'ایجاد تراکنش معمولی', 'CREATE'),
+    (N'CREATE_HIGH_VALUE_TRANSACTION', N'ایجاد تراکنش با مبلغ بالا', 'CREATE'),
+    (N'CREATE_VERY_HIGH_VALUE_TRANSACTION', N'ایجاد تراکنش با مبلغ خیلی بالا', 'CREATE'),
+    (N'CREATE_USER', N'ایجاد کاربر جدید', 'CREATE'),
+    
+    -- UPDATE Permissions
+    (N'UPDATE_TRANSACTION', N'ویرایش تراکنش', 'UPDATE'),
+    (N'UPDATE_WALLET', N'ویرایش کیف پول', 'UPDATE'),
+    (N'UPDATE_USER', N'ویرایش اطلاعات کاربر', 'UPDATE'),
+    
+    -- DELETE Permissions
+    (N'DELETE_TRANSACTION', N'حذف تراکنش', 'DELETE'),
+    (N'CANCEL_TRANSACTION', N'لغو تراکنش', 'DELETE'),
+    
+    -- MANAGE Permissions
+    (N'MANAGE_USERS', N'مدیریت کاربران', 'MANAGE'),
+    (N'MANAGE_ROLES', N'مدیریت نقش‌ها', 'MANAGE'),
+    (N'MANAGE_PERMISSIONS', N'مدیریت دسترسی‌ها', 'MANAGE'),
+    (N'MANAGE_TENANT', N'مدیریت تنظیمات Tenant', 'MANAGE'),
+    (N'MANAGE_PRODUCTS', N'مدیریت محصولات', 'MANAGE'),
+    
+    -- ADMIN Permissions
+    (N'ADMIN_FULL_ACCESS', N'دسترسی کامل', 'ADMIN'),
+    (N'ADMIN_VIEW_SENSITIVE_DATA', N'مشاهده داده‌های حساس', 'ADMIN'),
+    (N'ADMIN_FORCE_TRANSACTION', N'اجبار تراکنش', 'ADMIN');
+GO
+
+-- Insert Role-Level Permissions (نمونه برای بنکدار)
+-- بنکدار سطح 1
+INSERT INTO RoleLevelPermissions (role_level_id, permission_id) 
+SELECT rl.role_level_id, p.permission_id FROM RoleLevels rl, Permissions p
+WHERE rl.role_id = 3 AND rl.level_number = 1 
+  AND p.permission_name IN (
+      N'VIEW_TRANSACTIONS', 
+      N'VIEW_WALLET', 
+      N'CREATE_TRANSACTION'
+  );
+
+-- بنکدار سطح 2
+INSERT INTO RoleLevelPermissions (role_level_id, permission_id) 
+SELECT rl.role_level_id, p.permission_id FROM RoleLevels rl, Permissions p
+WHERE rl.role_id = 3 AND rl.level_number = 2 
+  AND p.permission_name IN (
+      N'VIEW_TRANSACTIONS', 
+      N'VIEW_WALLET', 
+      N'VIEW_REPORTS',
+      N'CREATE_TRANSACTION',
+      N'CREATE_HIGH_VALUE_TRANSACTION',
+      N'UPDATE_TRANSACTION',
+      N'VIEW_AUDIT_LOG'
+  );
+
+-- مدیر بانک
+INSERT INTO RoleLevelPermissions (role_level_id, permission_id) 
+SELECT rl.role_level_id, p.permission_id FROM RoleLevels rl, Permissions p
+WHERE rl.role_id = 3 AND rl.level_number = 3;
+-- (مدیر همه دسترسی‌ها دارد)
+
+GO
+
+-- ============================================================
+-- 8. USEFUL VIEWS
+-- ============================================================
+
+-- View برای دیدن کاملِ دسترسی‌های هر کاربر
+CREATE VIEW vw_UserPermissions AS
+SELECT 
+    u.user_id,
+    u.email,
+    u.first_name,
+    u.last_name,
+    t.tenant_id,
+    t.tenant_name,
+    r.role_id,
+    r.role_name,
+    rl.role_level_id,
+    rl.level_number,
+    rl.level_name,
+    p.permission_id,
+    p.permission_name,
+    p.category
+FROM Users u
+INNER JOIN UserTenantRoles utr ON u.user_id = utr.user_id
+INNER JOIN Tenants t ON utr.tenant_id = t.tenant_id
+INNER JOIN Roles r ON utr.role_id = r.role_id
+INNER JOIN RoleLevels rl ON utr.role_level_id = rl.role_level_id
+LEFT JOIN RoleLevelPermissions rlp ON rl.role_level_id = rlp.role_level_id
+LEFT JOIN Permissions p ON rlp.permission_id = p.permission_id
+WHERE u.status = 'active' AND utr.status = 'active';
+GO
+
+-- View برای دیدن موجودی کاربر در هر Tenant
+CREATE VIEW vw_UserWalletSummary AS
+SELECT 
+    u.user_id,
+    u.email,
+    u.first_name,
+    u.last_name,
+    t.tenant_id,
+    t.tenant_name,
+    w.wallet_id,
+    w.wallet_balance,
+    m.metal_name,
+    p.purity,
+    wm.quantity,
+    wm.reserved_quantity,
+    (wm.quantity - wm.reserved_quantity) AS available_quantity
+FROM Users u
+INNER JOIN Wallets w ON u.user_id = w.user_id
+INNER JOIN Tenants t ON w.tenant_id = t.tenant_id
+LEFT JOIN WalletMetals wm ON w.wallet_id = wm.wallet_id
+LEFT JOIN Products prod ON wm.product_id = prod.product_id
+LEFT JOIN Metals m ON prod.metal_id = m.metal_id;
+GO
+
+-- ============================================================
+-- 9. STORED PROCEDURES برای عملیات پرکاربرد
+-- ============================================================
+
+-- SP برای ایجاد تراکنش منتقل کیف پول
+CREATE PROCEDURE sp_TransferWalletMetals
+    @fromUserId UNIQUEIDENTIFIER,
+    @toUserId UNIQUEIDENTIFIER,
+    @tenantId UNIQUEIDENTIFIER,
+    @productId UNIQUEIDENTIFIER,
+    @quantity DECIMAL(18, 6),
+    @description NVARCHAR(MAX),
+    @createdByUserId UNIQUEIDENTIFIER,
+    @transactionId UNIQUEIDENTIFIER OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        
+        -- متغیرهای محلی
+        DECLARE @fromWalletId UNIQUEIDENTIFIER;
+        DECLARE @toWalletId UNIQUEIDENTIFIER;
+        DECLARE @unitPrice DECIMAL(18, 2) = 0;
+        DECLARE @totalAmount DECIMAL(18, 2);
+        
+        -- پیدا کردن کیف پول‌ها
+        SELECT @fromWalletId = wallet_id FROM Wallets 
+        WHERE user_id = @fromUserId AND tenant_id = @tenantId;
+        
+        SELECT @toWalletId = wallet_id FROM Wallets 
+        WHERE user_id = @toUserId AND tenant_id = @tenantId;
+        
+        IF @fromWalletId IS NULL OR @toWalletId IS NULL
+        BEGIN
+            RAISERROR('Wallet not found', 16, 1);
+        END;
+        
+        -- بررسی موجودی کافی
+        DECLARE @availableQuantity DECIMAL(18, 6);
+        SELECT @availableQuantity = (quantity - ISNULL(reserved_quantity, 0))
+        FROM WalletMetals 
+        WHERE wallet_id = @fromWalletId AND product_id = @productId;
+        
+        IF @availableQuantity < @quantity
+        BEGIN
+            RAISERROR('Insufficient quantity in wallet', 16, 1);
+        END;
+        
+        -- محاسبه مبلغ کل
+        SET @totalAmount = @quantity * @unitPrice;
+        
+        -- ایجاد تراکنش
+        SET @transactionId = NEWID();
+        INSERT INTO Transactions (
+            transaction_id, tenant_id, transaction_type, from_user_id, to_user_id,
+            product_id, quantity, unit_price, total_amount, payment_method,
+            status, description, created_by_user_id, created_at
+        ) VALUES (
+            @transactionId, @tenantId, 'TRANSFER', @fromUserId, @toUserId,
+            @productId, @quantity, @unitPrice, @totalAmount, 'WALLET_TRANSFER',
+            'completed', @description, @createdByUserId, GETDATE()
+        );
+        
+        -- کاهش موجودی فروشنده
+        UPDATE WalletMetals 
+        SET quantity = quantity - @quantity, updated_at = GETDATE()
+        WHERE wallet_id = @fromWalletId AND product_id = @productId;
+        
+        -- افزایش موجودی خریدار
+        UPDATE WalletMetals 
+        SET quantity = quantity + @quantity, updated_at = GETDATE()
+        WHERE wallet_id = @toWalletId AND product_id = @productId;
+        
+        -- ثبت در Audit Log
+        INSERT INTO AuditLog (
+            audit_id, tenant_id, user_id, action, entity_type, entity_id,
+            old_value, new_value, status, created_at
+        ) VALUES (
+            NEWID(), @tenantId, @createdByUserId, 'TRANSFER', 'WALLET_METALS',
+            CAST(@productId AS NVARCHAR(MAX)),
+            N'From: ' + CAST(@fromUserId AS NVARCHAR(MAX)),
+            N'To: ' + CAST(@toUserId AS NVARCHAR(MAX)),
+            'SUCCESS', GETDATE()
+        );
+        
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+        
+        INSERT INTO AuditLog (
+            audit_id, tenant_id, user_id, action, entity_type, entity_id,
+            error_message, status, created_at
+        ) VALUES (
+            NEWID(), @tenantId, @createdByUserId, 'TRANSFER', 'WALLET_METALS',
+            CAST(@productId AS NVARCHAR(MAX)),
+            ERROR_MESSAGE(),
+            'FAILED', GETDATE()
+        );
+        
+        THROW;
+    END CATCH;
+END;
+GO
+
+-- ============================================================
+-- 10. INDEXES FOR PERFORMANCE
+-- ============================================================
+
+-- Composite indexes برای جستجوهای پرتکرار
+CREATE INDEX IX_Transactions_Tenant_Status ON Transactions(tenant_id, status, created_at DESC);
+CREATE INDEX IX_WalletMetals_Wallet_Product ON WalletMetals(wallet_id, product_id);
+CREATE INDEX IX_AuditLog_Tenant_CreatedAt ON AuditLog(tenant_id, created_at DESC);
+CREATE INDEX IX_Sessions_User_Tenant ON Sessions(user_id, tenant_id, status);
+GO
+
+-- ============================================================
+-- 11. DATABASE CONFIGURATION
+-- ============================================================
+
+-- تنظیمات برای بهینه‌سازی کارایی
+ALTER DATABASE JewelryTradingPlatform SET RECOVERY FULL;
+ALTER DATABASE JewelryTradingPlatform SET COMPATIBILITY_LEVEL = 150; -- SQL Server 2019
+GO
+
+PRINT N'✅ Database created successfully!';
+PRINT N'Tables: 22';
+PRINT N'Stored Procedures: 1';
+PRINT N'Views: 2';
+PRINT N'Indexes: 20+';
+GO
