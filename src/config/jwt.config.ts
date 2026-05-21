@@ -6,6 +6,6 @@ export const getJwtConfig = (
 ): JwtModuleOptions => ({
     secret: configService.get<string>('JWT_SECRET', 'your-secret-key'),
     signOptions: {
-        expiresIn: configService.get<string>('JWT_EXPIRATION', '7d'),
+        expiresIn: configService.get<string>('JWT_EXPIRATION', '7d') as unknown as string | number,
     },
 });

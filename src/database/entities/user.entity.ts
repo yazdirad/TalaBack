@@ -7,20 +7,30 @@ import {
     ManyToOne,
     OneToMany,
     JoinColumn,
+    Index,
 } from 'typeorm';
 import { Tenant } from './tenant.entity';
 import { Wallet } from './wallet.entity';
+import { Session } from './session.entity';
 
 @Entity('Users')
 export class User {
     @PrimaryGeneratedColumn('uuid')
     user_id: string;
 
-    @Column({ type: 'nvarchar', length: 255, unique: true })
+    @Column({ type: 'nvarchar', length: 255, unique: true, nullable: true })
     email: string;
 
-    @Column({ type: 'nvarchar', length: 20, nullable: true })
+    @Index({ unique: true })
+    @Column({ type: 'nvarchar', length: 20, unique: true })
     phone: string;
+
+    @Index({ unique: true })
+    @Column({ type: 'nvarchar', length: 20, unique: true })
+    national_id: string;
+
+    @Column({ type: 'bit', default: false })
+    is_profile_completed: boolean;
 
     @Column({ type: 'nvarchar', length: 100, nullable: true })
     first_name: string;
@@ -53,13 +63,10 @@ export class User {
     two_factor_enabled: boolean;
 
     @Column({ type: 'nvarchar', length: 50, nullable: true })
-    two_factor_method: string;
+    two_factor_method: string | null;
 
     @Column({ type: 'nvarchar', nullable: true })
     profile_picture_url: string;
-
-    @Column({ type: 'nvarchar', length: 50, nullable: true })
-    national_id: string;
 
     @CreateDateColumn()
     created_at: Date;
@@ -69,4 +76,7 @@ export class User {
 
     @OneToMany(() => Wallet, (wallet) => wallet.user)
     wallets: Wallet[];
+
+    @OneToMany(() => Session, (session) => session.user)
+    sessions: Session[];
 }

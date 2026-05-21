@@ -6,6 +6,8 @@ import * as Joi from 'joi';
 // Modules
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
+import { SessionsModule } from './modules/sessions/sessions.module';
+import { UserTenantRolesModule } from './modules/user-tenant-roles/user-tenant-roles.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { PermissionsModule } from './modules/permissions/permissions.module';
@@ -29,7 +31,9 @@ import { HealthModule } from './modules/health/health.module';
         DB_PASSWORD: Joi.string().required(),
         DB_DATABASE: Joi.string().required(),
         JWT_SECRET: Joi.string().required(),
-        JWT_EXPIRATION: Joi.string().required(),
+        JWT_EXPIRATION: Joi.string().default('7d'),
+        JWT_REFRESH_SECRET: Joi.string().required(),
+        JWT_REFRESH_EXPIRATION: Joi.string().default('30d'),
         APP_PORT: Joi.number().default(3000),
         NODE_ENV: Joi.string()
           .valid('development', 'production', 'test')
@@ -70,6 +74,8 @@ import { HealthModule } from './modules/health/health.module';
     // Feature Modules
     AuthModule,
     UsersModule,
+    SessionsModule,
+    UserTenantRolesModule,
     TenantsModule,
     RolesModule,
     PermissionsModule,
@@ -81,4 +87,4 @@ import { HealthModule } from './modules/health/health.module';
     HealthModule,
   ],
 })
-export class AppModule { }
+export class AppModule {}
